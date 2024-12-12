@@ -40,6 +40,7 @@ limitations under the License.
 #include "xla/stream_executor/gpu/gpu_asm_opts.h"
 #include "xla/stream_executor/semantic_version.h"
 #include "tsl/platform/logging.h"
+#include "tsl/platform/statusor.h"
 
 namespace stream_executor {
 
@@ -84,6 +85,9 @@ static std::string_view ToString(nvPTXCompileResult status) {
 absl::StatusOr<std::vector<uint8_t>> CompileGpuAsmUsingLibNvPtxCompiler(
     const CudaComputeCapability& cc, const std::string& ptx_contents,
     GpuAsmOpts options, bool cancel_if_reg_spill) {
+  TF_ASSIGN_OR_RETURN(auto version, GetLibNvPtxCompilerVersion());
+  WarnIfBadPtxasVersion("nvPTXCompiler", cc, version);
+
   nvPTXCompilerHandle compiler_handle{};
   RETURN_IF_NVPTXCOMPILER_ERROR(nvPTXCompilerCreate(
       &compiler_handle, ptx_contents.size(), ptx_contents.data()));
@@ -137,7 +141,7 @@ absl::StatusOr<std::vector<uint8_t>> CompileGpuAsmUsingLibNvPtxCompiler(
           "Linked libnvptxcompiler is too old for %s.", architecture));
     }
     if (IsPtxRegisterAllocationError(error_log)) {
-      return absl::ResourceExhaustedError(error_log);
+      return PtxRegisterAllocationError(error_log);
     }
 
     return absl::InternalError(

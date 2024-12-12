@@ -29,11 +29,11 @@ limitations under the License.
 #include "mlir/IR/Value.h"
 #include "mlir/IR/ValueRange.h"
 #include "mlir/Support/LLVM.h"
+#include "xla/hlo/analysis/indexing_map.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
+#include "xla/hlo/utils/hlo_traversal.h"
 #include "xla/service/gpu/fusions/mlir/computation_partitioner.h"
-#include "xla/service/gpu/hlo_traversal.h"
-#include "xla/service/gpu/model/indexing_map.h"
 #include "xla/stream_executor/device_description.h"
 
 namespace xla {
@@ -110,8 +110,8 @@ mlir::ValueRange EmitXlaLoopOp(
     mlir::ImplicitLocOpBuilder& b, mlir::ValueRange dim_values,
     mlir::ValueRange iter_args_inits, const IndexingMap& indexing_map,
     mlir::function_ref<llvm::SmallVector<mlir::Value>(
-        mlir::ValueRange ivs, mlir::ValueRange map_results,
-        mlir::ValueRange iter_args)>
+        mlir::ImplicitLocOpBuilder& nested_b, mlir::ValueRange ivs,
+        mlir::ValueRange map_results, mlir::ValueRange iter_args)>
         create_body,
     bool vectorize = false);
 

@@ -131,6 +131,10 @@ absl::StatusOr<std::vector<uint8_t>> CompileAndLinkUsingLibNvJitLink(
     return std::vector<uint8_t>();
   }
 
+  TF_ASSIGN_OR_RETURN(NvJitLinkVersion version, GetNvJitLinkVersion());
+  auto [version_major, version_minor] = version;
+  WarnIfBadPtxasVersion("nvJitLink", cc, {version_major, version_minor, 0});
+
   std::vector<std::string> cli_args;
   // On Hopper, default to sm_90a so that all instructions can be used. But
   // only sm_90 is forward compatible, so don't use sm_90a with newer hardware:

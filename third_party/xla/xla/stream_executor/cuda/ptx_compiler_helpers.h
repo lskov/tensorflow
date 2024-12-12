@@ -17,10 +17,19 @@ limitations under the License.
 #include <string_view>
 
 #include "absl/status/status.h"
+#include "xla/stream_executor/device_description.h"
+#include "xla/stream_executor/semantic_version.h"
 
 namespace stream_executor {
+
+// Creates a status with a payload indicating a register allocation error.
+absl::Status PtxRegisterAllocationError(std::string_view message);
+
 // Checks whether ptxas log contains errors related to register allocation.
 bool IsPtxRegisterAllocationError(std::string_view);
+
+// Checks whether the status is a register allocation error.
+bool IsPtxRegisterAllocationError(absl::Status status);
 
 // Identifies errors in the ptxas log and creates an error status.
 // `architecture` is the name of the GPU architecture, e.g. "sm_80" and is only
@@ -30,6 +39,11 @@ bool IsPtxRegisterAllocationError(std::string_view);
 absl::Status CreateErrorFromPTXASLog(std::string_view log,
                                      std::string_view architecture,
                                      bool cancel_if_reg_spill);
+
+// Warns if the ptxas version should be upgraded.
+void WarnIfBadPtxasVersion(std::string_view method,
+                           const CudaComputeCapability& cc,
+                           SemanticVersion compiler_version);
 }  // namespace stream_executor
 
 #endif  // XLA_STREAM_EXECUTOR_CUDA_PTX_COMPILER_HELPERS_H_

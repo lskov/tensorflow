@@ -53,6 +53,7 @@ limitations under the License.
 #include "xla/hlo/pass/hlo_pass_pipeline.h"
 #include "xla/hlo/transforms/simplifiers/float_normalization.h"
 #include "xla/hlo/utils/hlo_query.h"
+#include "xla/hlo/utils/hlo_traversal.h"
 #include "xla/pjrt/distributed/key_value_store_interface.h"
 #include "xla/primitive_util.h"
 #include "xla/service/algorithm_util.h"
@@ -65,7 +66,6 @@ limitations under the License.
 #include "xla/service/gpu/backend_configs.pb.h"
 #include "xla/service/gpu/buffer_comparator.h"
 #include "xla/service/gpu/gpu_float_support.h"
-#include "xla/service/gpu/hlo_traversal.h"
 #include "xla/service/gpu/ir_emission_utils.h"
 #include "xla/service/gpu/kernels/custom_kernel.h"
 #include "xla/service/gpu/kernels/custom_kernel_fusion.h"
@@ -86,6 +86,7 @@ limitations under the License.
 #include "xla/shape.h"
 #include "xla/shape_util.h"
 #include "xla/status_macros.h"
+#include "xla/stream_executor/cuda/ptx_compiler_helpers.h"
 #include "xla/stream_executor/device_description.h"
 #include "xla/stream_executor/device_memory.h"
 #include "xla/stream_executor/device_memory_allocator.h"
@@ -115,9 +116,6 @@ limitations under the License.
 // VLOG(4): Print all fusions
 // VLOG(5): Profiling information for every tiling
 // VLOG(10): Print fusion computations and each configuration
-
-// TODO(b/317016172): Update usages of TritonGemmConfig to use newly exposed
-// parameters.
 
 namespace xla {
 namespace gpu {
@@ -242,7 +240,6 @@ absl::StatusOr<TileSizeLimit> GetLimits(const HloDotInstruction& dot) {
                       ContractingDimensionIndex(dot, /*operand_number=*/1));
   // This is not a sharp upper limit, the actual m value can be much smaller
   // based on how much of the m dimension is physically contiguous.
-  // TODO(tdanyluk): Get the exact m value by running a TritonFusionAnalysis.
   const int max_m = tsl::NextPowerOfTwoS64(
       dot.operand(0)->shape().dimensions(non_contracting_index_lhs));
   // Theoretically the same is true as for m, but that is not possible in
@@ -349,11 +346,6 @@ absl::StatusOr<std::unique_ptr<HloModule>> CublasGemmAutotuneExtractor(
     TF_RETURN_IF_ERROR(gemm_rewriter.Run(new_module.get()).status());
     TF_RETURN_IF_ERROR(fusion_pass.Run(new_module.get()).status());
   }
-  // TODO(tdanyluk): Consider running GemmAlgorithmPicker here for better cuBLAS
-  // performance. It is probably not needed on Ampere and later because cuBLAS
-  // ignores the algorithm parameter for those targets. If we run
-  // GemmAlgorithmPicker, we probably should not run this in parallel with other
-  // compilations.
   return new_module;
 }
 
@@ -817,13 +809,9 @@ GemmFusionAutotunerImpl::GenerateTritonConfigs(const HloDotInstruction& dot) {
   int minBitWidth =
       std::min({primitive_util::BitWidth(out), primitive_util::BitWidth(in0),
                 primitive_util::BitWidth(in1)});
-  bool isF8Dot = primitive_util::IsF8Type(out) ||
-                 primitive_util::IsF8Type(in0) || primitive_util::IsF8Type(in1);
   for (auto convert : converts) {
     auto in_type = convert->operand(0)->shape().element_type();
     auto out_type = convert->shape().element_type();
-    isF8Dot |=
-        primitive_util::IsF8Type(in_type) || primitive_util::IsF8Type(out_type);
     minBitWidth = std::min({minBitWidth, primitive_util::BitWidth(in_type),
                             primitive_util::BitWidth(out_type)});
   }
@@ -881,11 +869,11 @@ GemmFusionAutotunerImpl::GenerateTritonConfigs(const HloDotInstruction& dot) {
     config.block_k =
         std::max(config.block_k, kLdmatrixGranularity / minBitWidth);
 
-    // Additionally, there are further issues happening on FP8 types and
+    // Additionally, there are further issues happening on 8 bit types and
     // predicates that require additional restriction on block_m when num_warps
     // > 8 (see b/378660935). It's unclear if the issue extends beyond these
     // cases, so restrictions here are conservative to these.
-    if ((isF8Dot || minBitWidth == 1) && config.num_warps > 8) {
+    if (minBitWidth <= 8 && config.num_warps > 8) {
       config.block_m = std::max(config.block_m, 32);
     }
 
@@ -1102,8 +1090,7 @@ absl::StatusOr<bool> GemmFusionAutotunerImpl::CheckRedZones(
   return false;
 }
 
-absl::StatusOr<std::optional<AutotuneResult>>
-GemmFusionAutotunerImpl::MeasurePerformance(
+absl::StatusOr<AutotuneResult> GemmFusionAutotunerImpl::MeasurePerformance(
     AutotunerCompileUtil& compile_util, const HloFusionInstruction& fusion,
     const ExecutableCandidate& candidate,
     std::optional<ScopedShapedBuffer>& reference_buffer) {
@@ -1121,32 +1108,28 @@ GemmFusionAutotunerImpl::MeasurePerformance(
                       RedzoneBuffers::FromInstruction(
                           *fusion_computation->FusionInstruction(), config_,
                           debug_options_, RedzoneBuffers::kAllInputs));
-  std::optional<ProfilingOutput> profiling_output;
-  TF_ASSIGN_OR_RETURN(profiling_output, compile_util.ProfileExecutable(
-                                            candidate.executable.get(), stream,
-                                            rz_buffers.input_buffers(),
-                                            rz_buffers.input_shapes()));
 
-  if (!profiling_output) {
-    VLOG(5) << "Skipping this tiling." << ToString(candidate.config);
-    return std::nullopt;
-  }
+  TF_ASSIGN_OR_RETURN(
+      ProfilingOutput profiling_output,
+      compile_util.ProfileExecutable(candidate.executable.get(), stream,
+                                     rz_buffers.input_buffers(),
+                                     rz_buffers.input_shapes()));
 
-  VLOG(5) << "Running the kernel took: " << profiling_output->duration;
-  LOG_IF(WARNING, profiling_output->duration >= absl::Seconds(1))
+  VLOG(5) << "Running the kernel took: " << profiling_output.duration;
+  LOG_IF(WARNING, profiling_output.duration >= absl::Seconds(1))
       << "Slow kernel for " << fusion.called_computations()[0]->ToString()
-      << " took: " << profiling_output->duration << ". "
+      << " took: " << profiling_output.duration << ". "
       << ToString(candidate.config);
 
   *res.mutable_run_time() =
-      tsl::proto_utils::ToDurationProto(profiling_output->duration);
+      tsl::proto_utils::ToDurationProto(profiling_output.duration);
 
   if (!config_.should_check_correctness()) {
     return res;
   }
 
   if (std::holds_alternative<CuBlasConfig>(candidate.config)) {
-    reference_buffer = std::move(profiling_output->output);
+    reference_buffer = std::move(profiling_output.output);
     return res;
   }
 
@@ -1157,7 +1140,7 @@ GemmFusionAutotunerImpl::MeasurePerformance(
     if (!rz_ok) return res;
 
     TF_RETURN_IF_ERROR(CompareBuffers(fusion, *reference_buffer,
-                                      profiling_output->output, res));
+                                      profiling_output.output, res));
   }
   return res;
 }
@@ -1171,15 +1154,22 @@ absl::StatusOr<std::vector<AutotuneResult>> GemmFusionAutotunerImpl::Profile(
   });
   std::vector<AutotuneResult> results;
   std::optional<ScopedShapedBuffer> reference_buffer;
-  for (const ExecutableCandidate& candidate : candidates) {
-    TF_ASSIGN_OR_RETURN(
-        auto result,
-        MeasurePerformance(compile_util, fusion, candidate, reference_buffer));
-    VLOG(2) << "Ran " << results.size() + 1 << " configs of "
-            << candidates.size() << ".";
-    if (result.has_value()) {
-      results.push_back(std::move(*result));
+  for (int i = 0; i < candidates.size(); ++i) {
+    absl::StatusOr<AutotuneResult> result = MeasurePerformance(
+        compile_util, fusion, candidates[i], reference_buffer);
+    // Treat register allocation error gracefully. If the compilation happens
+    // with the driver during execution then the error could surface here.
+    // It's enough to check this once here.
+    if (stream_executor::IsPtxRegisterAllocationError(result.status())) {
+      VLOG(5) << "Skipping candidate: " << ToString(candidates[i].config)
+              << ": " << result.status();
+      continue;
     }
+
+    VLOG(2) << "Ran " << i + 1 << " configs out of " << candidates.size()
+            << ".";
+    TF_RETURN_IF_ERROR(result.status());
+    results.push_back(std::move(*result));
   }
   VLOG(2) << "Done running.";
   return results;
