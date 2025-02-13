@@ -52,6 +52,7 @@ cc_library(
         "hlo_op_metadata.h",
         "hlo_opcode.h",
         "hlo_original_value.h",
+        "hlo_print_options.h",
         "hlo_schedule.h",
         "hlo_sharding.h",
         "hlo_sharding_metadata.h",
@@ -125,7 +126,7 @@ xla_cc_test(
         "//xla:shape_util",
         "//xla:xla_data_proto_cc",
         "//xla/tsl/platform:test_main",
-        "@com_google_googletest//:gtest_main",
+        "@com_google_googletest//:gtest",
     ],
 )
 
@@ -213,7 +214,7 @@ xla_cc_test(
         "//xla/tsl/platform:test_main",
         "@com_google_absl//absl/strings:string_view",
         "@com_google_absl//absl/synchronization",
-        "@com_google_googletest//:gtest_main",
+        "@com_google_googletest//:gtest",
     ],
 )
 
@@ -255,7 +256,7 @@ xla_cc_test(
         "//xla/hlo/utils:hlo_query",
         "//xla/tsl/platform:test",
         "//xla/tsl/platform:test_main",
-        "@com_google_googletest//:gtest_main",
+        "@com_google_googletest//:gtest",
     ],
 )
 
@@ -321,6 +322,19 @@ xla_cc_test(
         "//xla:xla_data_proto_cc",
         "//xla/service:hlo_proto_cc",
         "//xla/tsl/platform:test_main",
-        "@com_google_googletest//:gtest_main",
+        "@com_google_absl//absl/log:globals",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+xla_cc_test(
+    name = "hlo_casting_utils_test",
+    srcs = ["hlo_casting_utils_test.cc"],
+    deps = [
+        ":hlo",
+        "//xla:shape_util",
+        "//xla/tsl/platform:test_main",
+        "@com_google_benchmark//:benchmark",
+        "@com_google_googletest//:gtest",
     ],
 )

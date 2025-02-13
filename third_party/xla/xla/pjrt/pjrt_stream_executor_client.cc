@@ -114,6 +114,7 @@ limitations under the License.
 #include "xla/pjrt/pjrt_compiler.h"
 #include "xla/pjrt/pjrt_executable.h"
 #include "xla/pjrt/pjrt_future.h"
+#include "xla/pjrt/profiling/device_time_measurement.h"
 #include "xla/pjrt/semaphore.h"
 #include "xla/pjrt/tracked_device_buffer.h"
 #include "xla/pjrt/transpose.h"
@@ -1021,32 +1022,6 @@ PjRtStreamExecutorClient::BufferFromHostBuffer(
     const void* data, PrimitiveType type, absl::Span<int64_t const> dims,
     std::optional<absl::Span<int64_t const>> byte_strides,
     HostBufferSemantics host_buffer_semantics,
-    absl::AnyInvocable<void() &&> on_done_with_host_buffer, PjRtDevice* device,
-    const Layout* device_layout) {
-  return BufferFromHostBufferInternal(
-      data, type, dims, byte_strides, host_buffer_semantics,
-      std::move(on_done_with_host_buffer), device, device_layout,
-      /*memory_space=*/nullptr);
-}
-
-absl::StatusOr<std::unique_ptr<PjRtBuffer>>
-PjRtStreamExecutorClient::BufferFromHostBuffer(
-    const void* data, PrimitiveType type, absl::Span<int64_t const> dims,
-    std::optional<absl::Span<int64_t const>> byte_strides,
-    HostBufferSemantics host_buffer_semantics,
-    absl::AnyInvocable<void() &&> on_done_with_host_buffer,
-    PjRtDevice* device) {
-  return BufferFromHostBufferInternal(
-      data, type, dims, byte_strides, host_buffer_semantics,
-      std::move(on_done_with_host_buffer), device, /*device_layout=*/nullptr,
-      /*memory_space=*/nullptr);
-}
-
-absl::StatusOr<std::unique_ptr<PjRtBuffer>>
-PjRtStreamExecutorClient::BufferFromHostBuffer(
-    const void* data, PrimitiveType type, absl::Span<int64_t const> dims,
-    std::optional<absl::Span<int64_t const>> byte_strides,
-    HostBufferSemantics host_buffer_semantics,
     absl::AnyInvocable<void() &&> on_done_with_host_buffer,
     PjRtMemorySpace* memory_space, const Layout* device_layout) {
   return BufferFromHostBufferInternal(
@@ -1930,17 +1905,6 @@ PjRtStreamExecutorBuffer::CopyToDeviceHelper(
 }
 
 absl::StatusOr<std::unique_ptr<PjRtBuffer>>
-PjRtStreamExecutorBuffer::CopyToDevice(PjRtDevice* dst_device) {
-  tsl::profiler::TraceMe traceme("PjRtStreamExecutorBuffer::CopyToDevice");
-  VLOG(1) << "PjRtStreamExecutorBuffer::CopyToDevice";
-  if (dst_device == device_) {
-    return InvalidArgument(
-        "CopyToDevice cannot accept the same source and destination devices");
-  }
-  return CopyToDeviceMemorySpace(dst_device, nullptr);
-}
-
-absl::StatusOr<std::unique_ptr<PjRtBuffer>>
 PjRtStreamExecutorBuffer::CopyToDeviceMemorySpace(
     PjRtDevice* dst_device, PjRtMemorySpace* dst_memory_space) {
   if (dst_device == device_ && dst_memory_space == memory_space() &&
@@ -1963,7 +1927,8 @@ PjRtStreamExecutorBuffer::CopyToDeviceMemorySpace(
         literal_pointer->shape().element_type(),
         literal_pointer->shape().dimensions(), byte_strides,
         PjRtStreamExecutorClient::HostBufferSemantics::kImmutableZeroCopy,
-        [literal{std::move(literal)}]() { /* frees literal */ }, dst_device);
+        [literal{std::move(literal)}]() { /* frees literal */ },
+        dst_memory_space, /*device_layout=*/nullptr);
   }
 
   TF_ASSIGN_OR_RETURN(
@@ -2879,6 +2844,18 @@ PjRtStreamExecutorLoadedExecutable::EnqueueExecution(
         device_state->compute_semaphore().ScopedAcquire(1));
   }
 
+  auto start_time_ns = std::make_shared<uint64_t>();
+  std::optional<uint64_t> key = xla::GetDeviceTimeMeasurementKey();
+  // Record the start time of the execution by placing a callback on the stream
+  // directly before the execution. If this callback is added, another callback
+  // will be added directly after the execution to record the elapsed device
+  // time.
+  if (key.has_value()) {
+    TF_RETURN_IF_ERROR(device_state->ThenExecuteCallback(
+        device_state->compute_stream(), [start_time_ns]() {
+          *start_time_ns = tsl::Env::Default()->NowNanos();
+        }));
+  }
   absl::StatusOr<ExecutionOutput> result_buffer_or_status =
       executables_[executable_idx]->RunAsync(std::move(execution_inputs),
                                              run_options);
@@ -2888,6 +2865,27 @@ PjRtStreamExecutorLoadedExecutable::EnqueueExecution(
 
   if (!result_buffer_or_status.ok()) {
     return result_buffer_or_status.status();
+  }
+
+  // Add a callback on the stream to record the elapsed device time of the
+  // executable execution.
+  //
+  // Do not place other callbacks between the callback recording the start time
+  // and this callback because their execution time will incorrectly count
+  // toward device execution time.
+  //
+  // This callback is only added if there is a valid key to guarantee that
+  // either both or none of the device time measurement callbacks are added to
+  // the stream, and to avoid needing a mutex.
+  if (key.has_value()) {
+    TF_RETURN_IF_ERROR(device_state->ThenExecuteCallback(
+        device_state->compute_stream(),
+        [key, start_time_ns,
+         device_type = GetDeviceType(client_->platform_id())]() {
+          auto elapsed = absl::FromUnixNanos(tsl::Env::Default()->NowNanos()) -
+                         absl::FromUnixNanos(*start_time_ns);
+          xla::RecordDeviceTimeMeasurement(*key, elapsed, device_type);
+        }));
   }
 
   if (device_state->allocation_model() == LocalDeviceState::kSynchronous) {

@@ -479,7 +479,9 @@ cc_library(
 
 cc_library(
     name = "pjrt_stream_executor_client",
-    srcs = ["pjrt_stream_executor_client.cc"],
+    srcs = [
+        "pjrt_stream_executor_client.cc",
+    ],
     hdrs = ["pjrt_stream_executor_client.h"],
     visibility = internal_visibility(["//xla:friends"]),
     deps = [
@@ -511,6 +513,7 @@ cc_library(
         "//xla/hlo/builder:xla_computation",
         "//xla/hlo/ir:hlo",
         "//xla/pjrt/distributed:protocol_proto_cc",
+        "//xla/pjrt/profiling:device_time_measurement",
         "//xla/service:compiler",
         "//xla/service:computation_layout",
         "//xla/service:computation_placer",
@@ -572,6 +575,7 @@ xla_cc_test(
         "//xla/client:local_client",
         "//xla/hlo/builder:xla_builder",
         "//xla/hlo/testlib:test",
+        "//xla/pjrt/profiling:device_time_measurement",
         "//xla/service:cpu_plugin",
         "//xla/service:platform_util",
         "//xla/stream_executor:platform",
@@ -582,29 +586,8 @@ xla_cc_test(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/synchronization",
+        "@com_google_absl//absl/time",
         "@com_google_googletest//:gtest_main",
-    ],
-)
-
-cc_library(
-    name = "interpreter_device",
-    srcs = ["interpreter_device.cc"],
-    hdrs = ["interpreter_device.h"],
-    deps = [
-        ":local_device_state",
-        ":pjrt_client",
-        ":pjrt_stream_executor_client",
-        "//xla:util",
-        "//xla/client:client_library",
-        "//xla/client:local_client",
-        "//xla/service:interpreter_plugin",
-        "//xla/service:platform_util",
-        "//xla/stream_executor:platform",
-        "//xla/stream_executor:stream_executor_h",
-        "//xla/tsl/platform:statusor",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-        "@local_tsl//tsl/platform:fingerprint",
     ],
 )
 
@@ -1098,4 +1081,31 @@ cc_library(
         ],
         ["@com_google_absl//absl/status"],
     ),
+)
+
+cc_library(
+    name = "raw_buffer",
+    srcs = ["raw_buffer.cc"],
+    hdrs = ["raw_buffer.h"],
+    deps = [
+        ":pjrt_future",
+        "//xla/tsl/concurrency:ref_count",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+    ],
+)
+
+xla_cc_test(
+    name = "raw_buffer_test",
+    srcs = ["raw_buffer_test.cc"],
+    deps = [
+        ":raw_buffer",
+        "//xla/tsl/concurrency:ref_count",
+        "//xla/tsl/platform:errors",
+        "//xla/tsl/platform:status_matchers",
+        "//xla/tsl/platform:test",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_googletest//:gtest_main",
+    ],
 )

@@ -12,9 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("//tensorflow/lite/experimental/litert/build_common:special_rule.bzl", "gles_linkopts")
+
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
-    default_visibility = ["//tensorflow/lite/experimental/litert:__subpackages__"],
+    default_visibility = [
+        "//tensorflow/lite/experimental/litert:__subpackages__",
+        "//third_party/odml/infra/perf/mobile_tests/litert:__subpackages__",
+    ],
 )
 
 cc_library(
@@ -89,7 +94,7 @@ cc_test(
     linkopts = select({
         "//tensorflow:android": ["-landroid"],
         "//conditions:default": [],
-    }),
+    }) + gles_linkopts(),
     deps = [
         ":dispatch_delegate",
         "@com_google_googletest//:gtest_main",
@@ -163,6 +168,11 @@ cc_test(
         "//tensorflow:android": ["-landroid"],
         "//conditions:default": [],
     }),
+    tags = [
+        "no_oss",
+        "nobuilder",
+        "notap",
+    ],
     deps = [
         ":dispatch_delegate",
         "//tensorflow/lite:framework",

@@ -15,6 +15,7 @@ limitations under the License.
 #include "xla/service/gpu/amdgpu_compiler.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -244,7 +245,8 @@ absl::StatusOr<GpuCompiler::BackendCompileResult>
 AMDGPUCompiler::CompileTargetBinary(
     const HloModuleConfig& module_config, llvm::Module* llvm_module,
     const se::DeviceDescription& device_description, bool relocatable,
-    const HloModule* debug_module, const CompileOptions& options) {
+    const HloModule* debug_module, const CompileOptions& options,
+    std::optional<int> shard_number) {
   if (relocatable) {
     return Unimplemented("relocatable target binary is not implemented");
   }

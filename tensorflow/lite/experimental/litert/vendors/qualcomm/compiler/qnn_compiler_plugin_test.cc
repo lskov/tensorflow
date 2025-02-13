@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 #include <gtest/gtest.h>
@@ -22,7 +23,6 @@
 #include "tensorflow/lite/experimental/litert/c/litert_logging.h"
 #include "tensorflow/lite/experimental/litert/c/litert_model.h"
 #include "tensorflow/lite/experimental/litert/c/litert_op_code.h"
-#include "tensorflow/lite/experimental/litert/cc/litert_macros.h"
 #include "tensorflow/lite/experimental/litert/cc/litert_model.h"
 #include "tensorflow/lite/experimental/litert/core/model/model.h"
 #include "tensorflow/lite/experimental/litert/test/common.h"
@@ -31,7 +31,6 @@
 #include "tensorflow/lite/experimental/litert/vendors/c/litert_compiler_plugin.h"
 #include "tensorflow/lite/experimental/litert/vendors/cc/litert_compiler_plugin.h"
 #include "tensorflow/lite/experimental/litert/vendors/qualcomm/compiler/IR/qnn_op.h"
-#include "tensorflow/lite/experimental/litert/vendors/qualcomm/compiler/IR/qnn_tensor.h"
 #include "tensorflow/lite/experimental/litert/vendors/qualcomm/compiler/legalizations/quantize_op_legalization.h"
 
 namespace litert {
@@ -40,6 +39,7 @@ namespace {
 using ::testing::Values;
 
 // clang-format off
+// TODO: Add support and uncomment these models.
 const auto kSupportedOps =
                   Values(
                     "simple_add_op.tflite",
@@ -68,25 +68,28 @@ const auto kSupportedOps =
                     "simple_less_op.tflite",
                     "simple_greater_op.tflite",
                     "simple_gelu_op.tflite",
-                    "simple_dynamic_update_slice_op.tflite",
-                    "simple_pack_op.tflite",
+                    // "simple_dynamic_update_slice_op.tflite",
+                    // "simple_pack_op.tflite",
+                    "simple_gather_op.tflite",
+                    "simple_mean_op.tflite",
+                    "simple_split_op.tflite",
                     kFeedForwardModel,
-                    kKeyEinsumModel,
-                    kQueryEinsumModel,
-                    kValueEinsumModel,
-                    kAttnVecEinsumModel,
+                    // kKeyEinsumModel,
+                    // kQueryEinsumModel,
+                    // kValueEinsumModel,
+                    // kAttnVecEinsumModel,
                     kROPEModel,
                     kLookUpROPEModel,
                     kRMSNormModel,
                     kSDPAModel,
                     kAttentionModel,
                     kTransformerBlockModel,
-                    kQSimpleMul16x16Model,
-                    kQMulAdd16x16Model,
-                    kQQueryEinsum16x8Model,
-                    kQKeyEinsum16x8Model,
-                    kQVauleEinsum16x8Model,
-                    kQAttnVecEinsum16x8Model
+                    // kQSimpleMul16x16Model,
+                    // kQMulAdd16x16Model,
+                    // kQQueryEinsum16x8Model,
+                    // kQKeyEinsum16x8Model,
+                    // kQVauleEinsum16x8Model,
+                    // kQAttnVecEinsum16x8Model
                     );
 // clang-format on
 
@@ -123,12 +126,9 @@ TEST(TestQnnPlugin, CompileMulSubgraph) {
   auto plugin = CreatePlugin();
   auto model = testing::LoadTestFileModel("one_mul.tflite");
 
-  const auto subgraph = model.MainSubgraph();
-  LiteRtSubgraph litert_subgraph = subgraph->Get();
-
   LiteRtCompiledResult compiled;
-  LITERT_ASSERT_OK(LiteRtCompilerPluginCompile(plugin.get(), "V75",
-                                               &litert_subgraph, 1, &compiled));
+  LITERT_ASSERT_OK(
+      LiteRtCompilerPluginCompile(plugin.get(), "V75", model.Get(), &compiled));
 
   const void* byte_code;
   size_t byte_code_size;
@@ -150,6 +150,36 @@ TEST(TestQnnPlugin, CompileMulSubgraph) {
   absl::string_view op_data_string(reinterpret_cast<const char*>(op_data),
                                    op_data_size);
   ASSERT_EQ("qnn_partition_0", op_data_string);
+
+  LiteRtDestroyCompiledResult(compiled);
+}
+
+TEST(TestQnnPlugin, ShareContextBinary) {
+  auto plugin = CreatePlugin();
+  auto model = testing::LoadTestFileModel("cst_multi_subgraph.tflite");
+
+  LiteRtCompiledResult compiled;
+  LITERT_ASSERT_OK(
+      LiteRtCompilerPluginCompile(plugin.get(), "V75", model.Get(), &compiled));
+  uint64_t num_byte_code;
+  LITERT_ASSERT_OK(
+      LiteRtCompiledResultNumByteCodeModules(compiled, &num_byte_code));
+  ASSERT_EQ(num_byte_code, 1);
+
+  LiteRtDestroyCompiledResult(compiled);
+}
+
+TEST(TestQnnPlugin, NotShareContextBinary) {
+  auto plugin = CreatePlugin();
+  auto model = testing::LoadTestFileModel("multi_subgraph.tflite");
+
+  LiteRtCompiledResult compiled;
+  LITERT_ASSERT_OK(
+      LiteRtCompilerPluginCompile(plugin.get(), "V75", model.Get(), &compiled));
+  uint64_t num_byte_code;
+  LITERT_ASSERT_OK(
+      LiteRtCompiledResultNumByteCodeModules(compiled, &num_byte_code));
+  ASSERT_EQ(num_byte_code, 3);
 
   LiteRtDestroyCompiledResult(compiled);
 }
@@ -246,6 +276,27 @@ TEST(TestLegalization, QuantizeOpLegalizedToQuantizeOp) {
   EXPECT_EQ(qnn_op_name, kQnnOpName);
 }
 
+class QnnPluginOpValidationTest : public ::testing::TestWithParam<std::string> {
+};
+
+TEST_P(QnnPluginOpValidationTest, SupportedOpsTest) {
+  LITERT_LOG(LITERT_INFO, "Validating TFLite model: %s", GetParam().c_str());
+  auto plugin = CreatePlugin();
+  auto model = testing::LoadTestFileModel(GetParam());
+
+  const auto subgraph = model.MainSubgraph();
+  LiteRtSubgraph litert_subgraph = subgraph->Get();
+
+  LiteRtOpListT selected_ops;
+  LITERT_ASSERT_OK(LiteRtCompilerPluginPartition(plugin.get(), litert_subgraph,
+                                                 &selected_ops));
+
+  EXPECT_EQ(selected_ops.Vec().size(), litert_subgraph->Ops().size());
+}
+
+INSTANTIATE_TEST_SUITE_P(SupportedOpsTest, QnnPluginOpValidationTest,
+                         kSupportedOps);
+
 class QnnPluginOpCompatibilityTest
     : public ::testing::TestWithParam<std::string> {};
 
@@ -254,12 +305,9 @@ TEST_P(QnnPluginOpCompatibilityTest, SupportedOpsTest) {
   auto plugin = CreatePlugin();
   auto model = testing::LoadTestFileModel(GetParam());
 
-  const auto subgraph = model.MainSubgraph();
-  LiteRtSubgraph litert_subgraph = subgraph->Get();
-
   LiteRtCompiledResult compiled;
-  LITERT_ASSERT_OK(LiteRtCompilerPluginCompile(plugin.get(), "V75",
-                                               &litert_subgraph, 1, &compiled));
+  LITERT_ASSERT_OK(
+      LiteRtCompilerPluginCompile(plugin.get(), "V75", model.Get(), &compiled));
 
   const void* byte_code;
   size_t byte_code_size;

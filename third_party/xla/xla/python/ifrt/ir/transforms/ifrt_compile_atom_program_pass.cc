@@ -210,14 +210,17 @@ void IfrtCompileAtomProgramPass::runOnOperation() {
             CHECK(atom_executable_map_
                       ->try_emplace(compile_result->name,
                                     std::move(compile_result->executable))
-                      .second);
+                      .second)
+                << "Failed to insert atom executable to map. Executable `"
+                << compile_result->name << "` already exists";
           }
 
           // Generate CallLoadedExecutableOp.
           builder.setInsertionPointAfter(call_op);
           auto new_call = builder.create<CallLoadedExecutableOp>(
               call_op.getLoc(), call_op.getResultTypes(), call_op.getInputs(),
-              call_op.getControlInputs(), loaded_exec_op_ref,
+              call_op.getControlInputs(), call_op.getArgAttrsAttr(),
+              call_op.getResAttrsAttr(), loaded_exec_op_ref,
               call_op.getIoAliases(), call_op.getDonatedInputIndices());
           new_call->setDiscardableAttrs(
               call_op->getDiscardableAttrDictionary());

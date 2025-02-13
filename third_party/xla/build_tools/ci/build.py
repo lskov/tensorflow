@@ -53,6 +53,7 @@ _XLA_DEFAULT_TARGET_PATTERNS = (
 _KOKORO_ARTIFACTS_DIR = os.environ.get(
     "KOKORO_ARTIFACTS_DIR", "$KOKORO_ARTIFACTS_DIR"
 )
+_GITHUB_WORKSPACE = os.environ.get("GITHUB_WORKSPACE", "$GITHUB_WORKSPACE")
 
 
 def retry(
@@ -88,18 +89,19 @@ def _write_to_sponge_config(key, value) -> None:
 class BuildType(enum.Enum):
   """Enum representing all types of builds."""
   CPU_X86_SELF_HOSTED = enum.auto()
-  CPU_ARM64 = enum.auto()
   CPU_ARM64_SELF_HOSTED = enum.auto()
   GPU = enum.auto()
+  GPU_T4_SELF_HOSTED = enum.auto()
   GPU_CONTINUOUS = enum.auto()
 
   MACOS_CPU_X86 = enum.auto()
 
-  JAX_CPU = enum.auto()
+  JAX_CPU_SELF_HOSTED = enum.auto()
   JAX_GPU = enum.auto()
+  JAX_X86_GPU_T4_SELF_HOSTED = enum.auto()
 
-  TENSORFLOW_CPU = enum.auto()
-  TENSORFLOW_GPU = enum.auto()
+  TENSORFLOW_CPU_SELF_HOSTED = enum.auto()
+  TENSORFLOW_X86_GPU_T4_SELF_HOSTED = enum.auto()
 
 
 @dataclasses.dataclass(frozen=True, **_KW_ONLY_IF_PYTHON310)
@@ -167,10 +169,14 @@ class Build:
     if self.repo != "openxla/xla":
       _, repo_name = self.repo.split("/")
 
-      # pyformat:disable
-      cmds.append(["git", "clone", "--depth=1",
-                   f"https://github.com/{self.repo}", f"./github/{repo_name}"])
-      # pyformat:enable
+      if "self_hosted" not in self.type_.name.lower():
+        cmds.append([
+            "git",
+            "clone",
+            "--depth=1",
+            f"https://github.com/{self.repo}",
+            f"./github/{repo_name}",
+        ])
 
     cmds.extend(self.extra_setup_commands)
 
@@ -178,11 +184,7 @@ class Build:
 
     # pyformat:disable
 
-    if self.type_ == BuildType.CPU_ARM64 and using_docker:
-      # We would need to install parallel, but `apt` hangs regularly on Kokoro
-      # VMs due to yaqs/eng/q/4506961933928235008
-      cmds.append(["docker", "pull", self.image_url])
-    elif using_docker:
+    if using_docker:
       cmds.append(retry(["docker", "pull", self.image_url]))
 
     container_name = "xla_ci"
@@ -210,8 +212,8 @@ class Build:
     # MacOS VM, and slightly change TF config (likely by specifying tag_filters
     # manually).
     if self.type_ not in (
-        BuildType.TENSORFLOW_CPU,
-        BuildType.TENSORFLOW_GPU,
+        BuildType.TENSORFLOW_CPU_SELF_HOSTED,
+        BuildType.TENSORFLOW_X86_GPU_T4_SELF_HOSTED,
         BuildType.MACOS_CPU_X86,
     ):
       cmds.append(
@@ -257,13 +259,17 @@ _ML_BUILD_ARM64_IMAGE = "us-central1-docker.pkg.dev/tensorflow-sigs/tensorflow/m
 
 
 def nvidia_gpu_build_with_compute_capability(
-    *, type_: BuildType, configs: Tuple[str, ...], compute_capability: int
+    *,
+    type_: BuildType,
+    image_url: Optional[str],
+    configs: Tuple[str, ...],
+    compute_capability: int,
 ) -> Build:
   extra_gpu_tags = _tag_filters_for_compute_capability(compute_capability)
   return Build(
       type_=type_,
       repo="openxla/xla",
-      image_url=_ML_BUILD_IMAGE,
+      image_url=image_url,
       target_patterns=_XLA_DEFAULT_TARGET_PATTERNS,
       configs=configs,
       test_tag_filters=("-no_oss", "requires-gpu-nvidia", "gpu", "-rocm-only")
@@ -303,16 +309,6 @@ cpu_arm_tag_filter = (
     "-requires-gpu-amd",
     "-not_run:arm",
 )
-_CPU_ARM64_BUILD = Build(
-    type_=BuildType.CPU_ARM64,
-    repo="openxla/xla",
-    image_url=_ML_BUILD_ARM64_IMAGE,
-    configs=("warnings", "rbe_cross_compile_linux_arm64", "nonccl"),
-    target_patterns=_XLA_DEFAULT_TARGET_PATTERNS,
-    options={**_DEFAULT_BAZEL_OPTIONS, "build_tests_only": True},
-    build_tag_filters=cpu_arm_tag_filter,
-    test_tag_filters=cpu_arm_tag_filter,
-)
 _CPU_ARM64_SELF_HOSTED_BUILD = Build(
     type_=BuildType.CPU_ARM64_SELF_HOSTED,
     repo="openxla/xla",
@@ -323,9 +319,16 @@ _CPU_ARM64_SELF_HOSTED_BUILD = Build(
     build_tag_filters=cpu_arm_tag_filter,
     test_tag_filters=cpu_arm_tag_filter,
 )
-# TODO(ddunleavy): Setup additional build for a100 tests once L4 RBE is ready.
 _GPU_BUILD = nvidia_gpu_build_with_compute_capability(
     type_=BuildType.GPU,
+    image_url=_ML_BUILD_IMAGE,
+    configs=("warnings", "rbe_linux_cuda_nvcc"),
+    compute_capability=75,
+)
+
+_GPU_T4_SELF_HOSTED_BUILD = nvidia_gpu_build_with_compute_capability(
+    type_=BuildType.GPU_T4_SELF_HOSTED,
+    image_url=None,
     configs=("warnings", "rbe_linux_cuda_nvcc"),
     compute_capability=75,
 )
@@ -373,13 +376,11 @@ _MACOS_X86_BUILD = Build(
     ),
 )
 
-_JAX_CPU_BUILD = Build(
-    type_=BuildType.JAX_CPU,
+_JAX_CPU_SELF_HOSTED_BUILD = Build(
+    type_=BuildType.JAX_CPU_SELF_HOSTED,
     repo="google/jax",
-    image_url=_DEFAULT_IMAGE,
-    configs=(
-        "rbe_linux_x86_64",
-    ),
+    image_url=None,
+    configs=("rbe_linux_x86_64",),
     target_patterns=("//tests:cpu_tests", "//tests:backend_independent_tests"),
     test_env=dict(
         JAX_NUM_GENERATED_CASES=25,
@@ -387,7 +388,7 @@ _JAX_CPU_BUILD = Build(
     ),
     options=dict(
         **_DEFAULT_BAZEL_OPTIONS,
-        override_repository="xla=/github/xla",
+        override_repository=f"xla={_GITHUB_WORKSPACE}/openxla/xla",
         repo_env="HERMETIC_PYTHON_VERSION=3.12",
     ),
 )
@@ -414,10 +415,30 @@ _JAX_GPU_BUILD = Build(
     ),
 )
 
-_TENSORFLOW_CPU_BUILD = Build(
-    type_=BuildType.TENSORFLOW_CPU,
+_JAX_GPU_SELF_HOSTED_BUILD = Build(
+    type_=BuildType.JAX_X86_GPU_T4_SELF_HOSTED,
+    repo="google/jax",
+    image_url=None,
+    configs=("rbe_linux_x86_64_cuda",),
+    target_patterns=("//tests:gpu_tests", "//tests:backend_independent_tests"),
+    build_tag_filters=("-multiaccelerator",),
+    test_tag_filters=("-multiaccelerator",),
+    test_env=dict(
+        JAX_SKIP_SLOW_TESTS=1,
+        TF_CPP_MIN_LOG_LEVEL=0,
+        JAX_EXCLUDE_TEST_TARGETS="PmapTest.testSizeOverflow",
+    ),
+    options=dict(
+        **_DEFAULT_BAZEL_OPTIONS,
+        override_repository=f"xla={_GITHUB_WORKSPACE}/openxla/xla",
+        repo_env="HERMETIC_PYTHON_VERSION=3.10",
+    ),
+)
+
+_TENSORFLOW_CPU_SELF_HOSTED_BUILD = Build(
+    type_=BuildType.TENSORFLOW_CPU_SELF_HOSTED,
     repo="tensorflow/tensorflow",
-    image_url=_ML_BUILD_IMAGE,
+    image_url=None,
     configs=(
         "release_cpu_linux",
         "rbe_linux_cpu",
@@ -433,15 +454,15 @@ _TENSORFLOW_CPU_BUILD = Build(
     options=dict(
         verbose_failures=True,
         test_output="errors",
-        override_repository="xla=/github/xla",
+        override_repository=f"xla={_GITHUB_WORKSPACE}/openxla/xla",
         profile="profile.json.gz",
     ),
 )
 
-_TENSORFLOW_GPU_BUILD = Build(
-    type_=BuildType.TENSORFLOW_GPU,
+_TENSORFLOW_GPU_SELF_HOSTED_BUILD = Build(
+    type_=BuildType.TENSORFLOW_X86_GPU_T4_SELF_HOSTED,
     repo="tensorflow/tensorflow",
-    image_url=_ML_BUILD_IMAGE,
+    image_url=None,
     configs=(
         "release_gpu_linux",
         "rbe_linux_cuda",
@@ -459,23 +480,23 @@ _TENSORFLOW_GPU_BUILD = Build(
     options=dict(
         verbose_failures=True,
         test_output="errors",
-        override_repository="xla=/github/xla",
+        override_repository=f"xla={_GITHUB_WORKSPACE}/openxla/xla",
         profile="profile.json.gz",
     ),
 )
 
 _KOKORO_JOB_NAME_TO_BUILD_MAP = {
-    "tensorflow/xla/linux/arm64/build_cpu": _CPU_ARM64_BUILD,
     "tensorflow/xla/linux/gpu/build_gpu": _GPU_BUILD,
-    "tensorflow/xla/linux/github_continuous/arm64/build_cpu": _CPU_ARM64_BUILD,
     "tensorflow/xla/linux/github_continuous/build_gpu": _GPU_BUILD,
     "tensorflow/xla/macos/github_continuous/cpu_py39_full": _MACOS_X86_BUILD,
-    "tensorflow/xla/jax/cpu/build_cpu": _JAX_CPU_BUILD,
     "tensorflow/xla/jax/gpu/build_gpu": _JAX_GPU_BUILD,
-    "tensorflow/xla/tensorflow/cpu/build_cpu": _TENSORFLOW_CPU_BUILD,
-    "tensorflow/xla/tensorflow/gpu/build_gpu": _TENSORFLOW_GPU_BUILD,
     "xla-linux-x86-cpu": _CPU_X86_SELF_HOSTED_BUILD,
     "xla-linux-arm64-cpu": _CPU_ARM64_SELF_HOSTED_BUILD,
+    "xla-linux-x86-gpu-t4": _GPU_T4_SELF_HOSTED_BUILD,
+    "jax-linux-x86-cpu": _JAX_CPU_SELF_HOSTED_BUILD,
+    "jax-linux-x86-gpu-t4": _JAX_GPU_SELF_HOSTED_BUILD,
+    "tensorflow-linux-x86-cpu": _TENSORFLOW_CPU_SELF_HOSTED_BUILD,
+    "tensorflow-linux-x86-gpu-t4": _TENSORFLOW_GPU_SELF_HOSTED_BUILD,
 }
 
 
